@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Order Book Engine</title>
+  <meta name="description" content="Price-time priority matching engine with real-time depth visualization, invariant proofs, and market impact simulation.">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0a;
+      --panel: #111;
+      --border: #1a1a1a;
+      --amber: #ff8c00;
+      --amber-dim: #cc7000;
+      --green: #00cc66;
+      --green-dim: rgba(0, 204, 102, 0.15);
+      --red: #ff3333;
+      --red-dim: rgba(255, 51, 51, 0.15);
+      --blue: #3388ff;
+      --muted: #555;
+      --text: #bbb;
+      --dim: #444;
+      --font: "SF Mono", "Fira Code", "Consolas", "Monaco", "Courier New", monospace;
+    }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      overflow: hidden;
+      height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    #app {
+      display: grid;
+      height: 100vh;
+      grid-template:
+        "status  status  status"  32px
+        "book    depth   tape"    1fr
+        "ctrl    ctrl    metrics" 140px
+        / 280px  1fr     300px;
+      gap: 1px;
+      background: var(--border);
+    }
+
+    .panel {
+      background: var(--panel);
+      overflow: hidden;
+    }
+
+    /* Status bar */
+    #status-bar {
+      grid-area: status;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
+      background: #0e0e0e;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    #status-bar .label { color: var(--amber); font-weight: bold; letter-spacing: 1px; }
+    #status-bar .stat { margin-left: 16px; }
+    #status-bar .stat .val { color: var(--text); }
+    #status-bar .up { color: var(--green); }
+    #status-bar .down { color: var(--red); }
+    .imbalance-bar {
+      display: inline-block; width: 60px; height: 8px; background: #222;
+      border-radius: 2px; position: relative; vertical-align: middle; margin-left: 4px;
+    }
+    .imbalance-bar .fill {
+      position: absolute; top: 0; height: 100%; border-radius: 2px;
+      transition: width 0.1s, left 0.1s;
+    }
+
+    /* L2 Order Book */
+    #book-panel { grid-area: book; display: flex; flex-direction: column; }
+    #book-panel .panel-title {
+      padding: 6px 12px; font-size: 10px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border);
+    }
+    #book-content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .book-side { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    #asks-container { justify-content: flex-end; }
+    #bids-container { justify-content: flex-start; }
+    .book-row {
+      display: grid; grid-template-columns: 70px 50px 60px 1fr;
+      padding: 1px 8px; font-size: 11px; line-height: 20px;
+      cursor: pointer; position: relative;
+    }
+    .book-row:hover { background: rgba(255, 140, 0, 0.08); }
+    .book-row .bar {
+      position: absolute; top: 0; right: 0; height: 100%; opacity: 0.12; pointer-events: none;
+    }
+    .book-row.ask .price { color: var(--red); }
+    .book-row.bid .price { color: var(--green); }
+    .book-row .size, .book-row .cum { text-align: right; color: var(--dim); }
+    #spread-row {
+      padding: 2px 8px; font-size: 10px; color: var(--amber);
+      text-align: center; border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border); background: rgba(255, 140, 0, 0.04);
+    }
+
+    /* Depth chart */
+    #depth-panel { grid-area: depth; position: relative; }
+    #depth-canvas { width: 100%; height: 100%; display: block; }
+
+    /* Trade tape */
+    #tape-panel { grid-area: tape; display: flex; flex-direction: column; }
+    #tape-panel .panel-title {
+      padding: 6px 12px; font-size: 10px; color: var(--muted);
+      text-transform: uppercase; letter-spacing: 1px; border-bottom: 1px solid var(--border);
+    }
+    #tape-content { flex: 1; overflow: hidden; }
+    .tape-row {
+      display: grid; grid-template-columns: 70px 60px 50px 40px;
+      padding: 1px 8px; font-size: 11px; line-height: 18px;
+    }
+    .tape-row.buy-taker { color: var(--green); }
+    .tape-row.sell-taker { color: var(--red); }
+    .tape-row.flash { background: rgba(255, 140, 0, 0.15); transition: background 0.3s; }
+    .tape-header {
+      display: grid; grid-template-columns: 70px 60px 50px 40px;
+      padding: 2px 8px; font-size: 9px; color: var(--muted); text-transform: uppercase;
+    }
+
+    /* Controls */
+    #ctrl-panel {
+      grid-area: ctrl; padding: 8px 12px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .ctrl-row { display: flex; align-items: center; gap: 8px; }
+    .btn {
+      background: #1a1a1a; border: 1px solid #333; color: var(--text);
+      font-family: var(--font); font-size: 10px; padding: 4px 10px;
+      cursor: pointer; border-radius: 2px; text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .btn:hover { border-color: var(--amber); color: var(--amber); }
+    .btn.active { background: var(--amber); color: #000; border-color: var(--amber); }
+    .btn.buy { border-color: var(--green); color: var(--green); }
+    .btn.buy.active { background: var(--green); color: #000; }
+    .btn.sell { border-color: var(--red); color: var(--red); }
+    .btn.sell.active { background: var(--red); color: #000; }
+    .btn.impact { border-color: var(--amber); }
+    .btn.impact:hover { background: var(--amber); color: #000; }
+    input[type="number"] {
+      background: #1a1a1a; border: 1px solid #333; color: var(--text);
+      font-family: var(--font); font-size: 11px; padding: 4px 6px;
+      width: 70px; border-radius: 2px;
+    }
+    input[type="number"]:focus { border-color: var(--amber); outline: none; }
+    input[type="range"] { width: 100px; accent-color: var(--amber); }
+    .ctrl-label { font-size: 10px; color: var(--muted); min-width: 40px; }
+
+    /* Metrics */
+    #metrics-panel {
+      grid-area: metrics; padding: 8px 12px; font-size: 11px;
+      display: flex; flex-direction: column; gap: 3px;
+    }
+    .metric-row { display: flex; justify-content: space-between; }
+    .metric-row .label { color: var(--muted); }
+    .metric-row .val { color: var(--text); }
+    .invariant { font-size: 10px; }
+    .invariant.pass { color: var(--green); }
+    .invariant.fail { color: var(--red); }
+    .section-label {
+      font-size: 9px; color: var(--muted); text-transform: uppercase;
+      letter-spacing: 1px; margin-top: 4px; border-bottom: 1px solid var(--border);
+      padding-bottom: 2px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <!-- Status Bar -->
+    <div id="status-bar" class="panel">
+      <span class="label">ORDER BOOK ENGINE</span>
+      <div>
+        <span class="stat">SIM/USD</span>
+        <span class="stat">Spread: <span class="val" id="s-spread">—</span></span>
+        <span class="stat">Mid: <span class="val" id="s-mid">—</span></span>
+        <span class="stat">Last: <span class="val" id="s-last">—</span></span>
+        <span class="stat">VWAP: <span class="val" id="s-vwap">—</span></span>
+        <span class="stat">Imbalance:
+          <span class="imbalance-bar"><span class="fill" id="s-imb-fill"></span></span>
+        </span>
+      </div>
+      <span class="stat" id="s-ops">0 ord/s</span>
+    </div>
+
+    <!-- L2 Order Book -->
+    <div id="book-panel" class="panel">
+      <div class="panel-title">Order Book</div>
+      <div id="book-content">
+        <div class="book-side" id="asks-container"></div>
+        <div id="spread-row">SPREAD —</div>
+        <div class="book-side" id="bids-container"></div>
+      </div>
+    </div>
+
+    <!-- Depth Chart -->
+    <div id="depth-panel" class="panel">
+      <canvas id="depth-canvas"></canvas>
+    </div>
+
+    <!-- Trade Tape -->
+    <div id="tape-panel" class="panel">
+      <div class="panel-title">Trades</div>
+      <div class="tape-header"><span>Time</span><span>Price</span><span>Size</span><span>Side</span></div>
+      <div id="tape-content"></div>
+    </div>
+
+    <!-- Controls -->
+    <div id="ctrl-panel" class="panel">
+      <div class="ctrl-row">
+        <button class="btn buy active" id="btn-buy" onclick="setSide('BUY')">Buy</button>
+        <button class="btn sell" id="btn-sell" onclick="setSide('SELL')">Sell</button>
+        <button class="btn" id="btn-limit" onclick="setType('LIMIT')">Limit</button>
+        <button class="btn active" id="btn-market" onclick="setType('MARKET')">Market</button>
+        <span class="ctrl-label">Price:</span>
+        <input type="number" id="inp-price" value="100" step="0.5">
+        <span class="ctrl-label">Qty:</span>
+        <input type="number" id="inp-qty" value="10" min="1">
+        <button class="btn" onclick="manualSubmit()">Submit</button>
+      </div>
+      <div class="ctrl-row">
+        <button class="btn" id="btn-auto" onclick="toggleAuto()">Auto ▶</button>
+        <span class="ctrl-label">Speed:</span>
+        <input type="range" id="speed-slider" min="1" max="100" value="20">
+        <span id="speed-val" style="font-size:10px;color:var(--muted)">20/s</span>
+        <button class="btn impact" onclick="marketImpact()">Market Impact</button>
+        <button class="btn" onclick="clearBook()">Clear</button>
+        <button class="btn" onclick="runBenchmark()">Benchmark</button>
+      </div>
+    </div>
+
+    <!-- Metrics -->
+    <div id="metrics-panel" class="panel">
+      <div class="section-label">Session</div>
+      <div class="metric-row"><span class="label">Orders</span><span class="val" id="m-orders">0</span></div>
+      <div class="metric-row"><span class="label">Trades</span><span class="val" id="m-trades">0</span></div>
+      <div class="metric-row"><span class="label">Depth</span><span class="val" id="m-depth">0 / 0</span></div>
+      <div class="section-label">Benchmark</div>
+      <div class="metric-row"><span class="label">Throughput</span><span class="val" id="m-tput">—</span></div>
+      <div class="metric-row"><span class="label">p95 latency</span><span class="val" id="m-p95">—</span></div>
+      <div class="section-label">Invariants</div>
+      <div id="invariant-list"></div>
+    </div>
+  </div>
+
+  <script src="engine.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

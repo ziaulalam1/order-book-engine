@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Order Book — Invariant Tests</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "SF Mono", "Fira Code", "Consolas", monospace;
+      background: #0a0a0a; color: #bbb; padding: 24px;
+    }
+    h1 { color: #ff8c00; font-size: 16px; margin-bottom: 16px; }
+    .test { padding: 8px 12px; margin: 4px 0; border-left: 3px solid #333; font-size: 13px; }
+    .pass { border-color: #00cc66; color: #00cc66; }
+    .fail { border-color: #ff3333; color: #ff3333; }
+    .summary { margin-top: 16px; padding: 12px; background: #111; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <h1>ORDER BOOK ENGINE — INVARIANT TESTS</h1>
+  <div id="results"></div>
+  <div id="summary" class="summary"></div>
+  <script src="../engine.js"></script>
+  <script>
+    const results = document.getElementById('results');
+    const summary = document.getElementById('summary');
+    let passed = 0, failed = 0;
+
+    function assert(condition, testName, detail) {
+      const el = document.createElement('div');
+      el.className = 'test ' + (condition ? 'pass' : 'fail');
+      el.textContent = (condition ? '\u2713 ' : '\u2717 ') + testName + (detail ? ' — ' + detail : '');
+      results.appendChild(el);
+      condition ? passed++ : failed++;
+    }
+
+    // Test 1: Price-time priority
+    (function testPriceTimePriority() {
+      const book = new OrderBook();
+      const rA = book.submitOrder('SELL', 'LIMIT', 100, 5); // order A
+      const idA = rA.id;
+      const rB = book.submitOrder('SELL', 'LIMIT', 100, 5); // order B (same price, later)
+      const idB = rB.id;
+      const rBuy = book.submitOrder('BUY', 'LIMIT', 100, 5);
+
+      const matchedMaker = rBuy.fills[0].makerId;
+      assert(matchedMaker === idA, 'Price-time priority',
+        'Buy matched maker ' + matchedMaker + ' (expected ' + idA + ', not ' + idB + ')');
+
+      // B should still be resting
+      const snap = book.getSnapshot();
+      assert(snap.asks.length === 1 && snap.asks[0].qty === 5, 'Price-time: order B still resting');
+    })();
+
+    // Test 2: No trade at worse price
+    (function testNoWorsePrice() {
+      const book = new OrderBook();
+      book.submitOrder('BUY', 'LIMIT', 100, 10);
+      book.submitOrder('SELL', 'LIMIT', 101, 5);
+      assert(book.trades.length === 0, 'No worse price: buy@100 vs sell@101 = no trade');
+
+      const r = book.submitOrder('SELL', 'LIMIT', 99, 5);
+      assert(r.fills.length === 1 && r.fills[0].price === 100, 'No worse price: sell@99 matches buy@100 at price 100',
+        'fill price=' + (r.fills.length > 0 ? r.fills[0].price : 'none'));
+    })();
+
+    // Test 2b: Buy limit should not match at higher price than limit
+    (function testBuyNotAboveLimit() {
+      const book = new OrderBook();
+      book.submitOrder('SELL', 'LIMIT', 105, 10);
+      const r = book.submitOrder('BUY', 'LIMIT', 100, 5);
+      assert(r.fills.length === 0, 'Buy@100 does not match sell@105');
+    })();
+
+    // Test 3: Conservation of shares
+    (function testConservation() {
+      const book = new OrderBook();
+      let totalSubmitted = 0;
+      for (let i = 0; i < 10000; i++) {
+        const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
+        const price = +(100 + (Math.random() * 10 - 5)).toFixed(2);
+        const qty = 1 + Math.floor(Math.random() * 10);
+        totalSubmitted += qty;
+        book.submitOrder(side, 'LIMIT', price, qty);
+      }
+      const resting = book.getRestingQty();
+      const executed = book.getExecutedQty();
+      // Each submitted qty is either resting or was part of a fill (counted once per side)
+      // totalSubmitted = resting + executed (where executed = trades * qty * 2 because each trade has maker + taker)
+      // Actually: for each trade, one maker loses qty and one taker loses qty from their submitted total
+      // So: totalSubmitted = resting + 2 * sum(trade.qty)
+      const conserved = (resting + executed) === totalSubmitted;
+      assert(conserved, 'Conservation of shares (10,000 orders)',
+        'submitted=' + totalSubmitted + ' resting=' + resting + ' executed=' + executed + ' sum=' + (resting + executed));
+    })();
+
+    // Test 4: Book always sorted
+    (function testSorted() {
+      const book = new OrderBook();
+      for (let i = 0; i < 10000; i++) {
+        const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
+        const price = +(100 + (Math.random() * 10 - 5)).toFixed(2);
+        const qty = 1 + Math.floor(Math.random() * 10);
+        book.submitOrder(side, 'LIMIT', price, qty);
+      }
+      let bidsSorted = true;
+      for (let i = 1; i < book.bids.length; i++) {
+        if (book.bids[i].price > book.bids[i - 1].price) { bidsSorted = false; break; }
+      }
+      let asksSorted = true;
+      for (let i = 1; i < book.asks.length; i++) {
+        if (book.asks[i].price < book.asks[i - 1].price) { asksSorted = false; break; }
+      }
+      assert(bidsSorted, 'Bids sorted descending (' + book.bids.length + ' levels)');
+      assert(asksSorted, 'Asks sorted ascending (' + book.asks.length + ' levels)');
+    })();
+
+    // Test 5: Market order rejected on empty book
+    (function testEmptyBookReject() {
+      const book = new OrderBook();
+      const r = book.submitOrder('BUY', 'MARKET', null, 10);
+      assert(r.rejectReason === 'NO_LIQUIDITY', 'Market buy on empty book rejected',
+        'reason=' + r.rejectReason);
+      assert(book.trades.length === 0, 'No trades on rejected market order');
+    })();
+
+    // Summary
+    summary.textContent = passed + ' passed, ' + failed + ' failed';
+    summary.style.color = failed === 0 ? '#00cc66' : '#ff3333';
+  </script>
+</body>
+</html>
