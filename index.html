@@ -40,8 +40,8 @@
       grid-template:
         "status  status  status"  32px
         "book    depth   tape"    1fr
-        "ctrl    ctrl    metrics" 140px
-        / 280px  1fr     300px;
+        "ctrl    ctrl    metrics" 220px
+        / 280px  1fr     320px;
       gap: 1px;
       background: var(--border);
     }
@@ -160,6 +160,7 @@
     #metrics-panel {
       grid-area: metrics; padding: 8px 12px; font-size: 11px;
       display: flex; flex-direction: column; gap: 3px;
+      overflow-y: auto;
     }
     .metric-row { display: flex; justify-content: space-between; }
     .metric-row .label { color: var(--muted); }
@@ -171,6 +172,39 @@
       font-size: 9px; color: var(--muted); text-transform: uppercase;
       letter-spacing: 1px; margin-top: 4px; border-bottom: 1px solid var(--border);
       padding-bottom: 2px;
+    }
+
+    /* My Orders panel (inside metrics) */
+    #my-orders-list {
+      max-height: 80px; overflow-y: auto; font-size: 10px;
+    }
+    .my-order-row {
+      display: grid; grid-template-columns: 18px 28px 50px 40px 16px;
+      gap: 4px; padding: 1px 2px; line-height: 16px; align-items: center;
+    }
+    .my-order-row .id { color: var(--muted); }
+    .my-order-row .side.buy { color: var(--green); }
+    .my-order-row .side.sell { color: var(--red); }
+    .my-order-row .price { text-align: right; color: var(--text); }
+    .my-order-row .qty { text-align: right; color: var(--dim); }
+    .my-order-row .x {
+      cursor: pointer; color: var(--red); text-align: center;
+      font-weight: bold; user-select: none;
+    }
+    .my-order-row .x:hover { color: var(--amber); }
+    .my-order-empty { color: var(--dim); font-size: 10px; padding: 2px 0; }
+
+    /* Highlight user's own resting orders in the book */
+    .book-row.mine {
+      box-shadow: inset 2px 0 0 var(--amber);
+    }
+    .book-row.mine .price::after {
+      content: " *"; color: var(--amber); font-weight: bold;
+    }
+
+    /* Latency histogram canvas */
+    #latency-hist {
+      width: 100%; height: 50px; display: block; margin-top: 2px;
     }
   </style>
 </head>
@@ -221,6 +255,8 @@
         <button class="btn sell" id="btn-sell" onclick="setSide('SELL')">Sell</button>
         <button class="btn" id="btn-limit" onclick="setType('LIMIT')">Limit</button>
         <button class="btn active" id="btn-market" onclick="setType('MARKET')">Market</button>
+        <button class="btn" id="btn-ioc" onclick="setType('IOC')" title="Immediate-or-Cancel: match what you can at price, kill remainder">IOC</button>
+        <button class="btn" id="btn-fok" onclick="setType('FOK')" title="Fill-or-Kill: all-or-nothing; reject if full quantity not fillable">FOK</button>
         <span class="ctrl-label">Price:</span>
         <input type="number" id="inp-price" value="100" step="0.5">
         <span class="ctrl-label">Qty:</span>
@@ -240,13 +276,18 @@
 
     <!-- Metrics -->
     <div id="metrics-panel" class="panel">
+      <div class="section-label">My Orders</div>
+      <div id="my-orders-list">
+        <div class="my-order-empty">no manual orders yet</div>
+      </div>
       <div class="section-label">Session</div>
       <div class="metric-row"><span class="label">Orders</span><span class="val" id="m-orders">0</span></div>
       <div class="metric-row"><span class="label">Trades</span><span class="val" id="m-trades">0</span></div>
       <div class="metric-row"><span class="label">Depth</span><span class="val" id="m-depth">0 / 0</span></div>
       <div class="section-label">Benchmark</div>
       <div class="metric-row"><span class="label">Throughput</span><span class="val" id="m-tput">—</span></div>
-      <div class="metric-row"><span class="label">p95 latency</span><span class="val" id="m-p95">—</span></div>
+      <div class="metric-row"><span class="label">p50/p95/p99</span><span class="val" id="m-pcts">—</span></div>
+      <canvas id="latency-hist"></canvas>
       <div class="section-label">Invariants</div>
       <div id="invariant-list"></div>
     </div>

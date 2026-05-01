@@ -9,6 +9,7 @@ class OrderBook {
     this.allOrders = new Map(); // id -> {side, price, qty, ts, status}
     this.nextId = 1;
     this.totalSubmittedQty = 0;
+    this.totalCancelledQty = 0; // unfilled qty from rejects, IOC kills, MARKET partial/empty
     this.vwapNum = 0;
     this.vwapDen = 0;
   }
@@ -21,13 +22,47 @@ class OrderBook {
 
     if (type === 'MARKET') {
       if (side === 'BUY') {
-        if (this.asks.length === 0) { result.rejectReason = 'NO_LIQUIDITY'; return result; }
+        if (this.asks.length === 0) {
+          result.rejectReason = 'NO_LIQUIDITY';
+          this.totalCancelledQty += qty;
+          return result;
+        }
         this._matchBuy(id, qty, Infinity, ts, result);
+        if (result.remainingQty > 0) this.totalCancelledQty += result.remainingQty;
       } else {
-        if (this.bids.length === 0) { result.rejectReason = 'NO_LIQUIDITY'; return result; }
+        if (this.bids.length === 0) {
+          result.rejectReason = 'NO_LIQUIDITY';
+          this.totalCancelledQty += qty;
+          return result;
+        }
         this._matchSell(id, qty, 0, ts, result);
+        if (result.remainingQty > 0) this.totalCancelledQty += result.remainingQty;
       }
+    } else if (type === 'FOK') {
+      // Fill-or-Kill: all-or-nothing. Check fillability without mutating state.
+      const fillable = side === 'BUY'
+        ? this._fillableQtyBuy(price)
+        : this._fillableQtySell(price);
+      if (fillable < qty) {
+        result.rejectReason = 'FOK_NOT_FILLABLE';
+        this.totalCancelledQty += qty;
+        delete result.remainingQty;
+        return result;
+      }
+      if (side === 'BUY') this._matchBuy(id, qty, price, ts, result);
+      else this._matchSell(id, qty, price, ts, result);
+      // Remainder should be 0; do not rest.
+    } else if (type === 'IOC') {
+      // Immediate-or-Cancel: match what you can, kill the remainder.
+      if (side === 'BUY') this._matchBuy(id, qty, price, ts, result);
+      else this._matchSell(id, qty, price, ts, result);
+      if (result.remainingQty > 0) {
+        result.cancelledQty = result.remainingQty;
+        this.totalCancelledQty += result.remainingQty;
+      }
+      // Do not rest.
     } else {
+      // LIMIT: match what you can, rest the remainder.
       if (side === 'BUY') {
         this._matchBuy(id, qty, price, ts, result);
         if (result.remainingQty > 0) {
@@ -44,6 +79,26 @@ class OrderBook {
     }
     delete result.remainingQty;
     return result;
+  }
+
+  // Pre-match peek: total ask qty fillable at price <= maxPrice (for BUY taker)
+  _fillableQtyBuy(maxPrice) {
+    let total = 0;
+    for (const level of this.asks) {
+      if (level.price > maxPrice) break;
+      for (const o of level.orders) total += o.qty;
+    }
+    return total;
+  }
+
+  // Pre-match peek: total bid qty fillable at price >= minPrice (for SELL taker)
+  _fillableQtySell(minPrice) {
+    let total = 0;
+    for (const level of this.bids) {
+      if (level.price < minPrice) break;
+      for (const o of level.orders) total += o.qty;
+    }
+    return total;
   }
 
   _matchBuy(takerId, qty, maxPrice, ts, result) {
@@ -200,6 +255,7 @@ class OrderBook {
     this.allOrders.clear();
     this.nextId = 1;
     this.totalSubmittedQty = 0;
+    this.totalCancelledQty = 0;
     this.vwapNum = 0;
     this.vwapDen = 0;
   }

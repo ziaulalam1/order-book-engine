@@ -15,6 +15,13 @@ let opsPerSec = 0;
 let lastTradeIdx = 0;
 let impactSide = 'BUY';
 
+// Track manually-submitted orders (id -> {side, price, qty}) so we can:
+//   1. show them in the My Orders panel
+//   2. let the user cancel them via × button
+//   3. highlight their resting orders in the book
+const myOrders = new Map();
+let lastBenchmark = null; // { latencies: Float64Array, p50/p95/p99 }
+
 // DOM refs
 const asksContainer = document.getElementById('asks-container');
 const bidsContainer = document.getElementById('bids-container');
@@ -44,14 +51,100 @@ function setType(t) {
   orderType = t;
   document.getElementById('btn-limit').classList.toggle('active', t === 'LIMIT');
   document.getElementById('btn-market').classList.toggle('active', t === 'MARKET');
+  document.getElementById('btn-ioc').classList.toggle('active', t === 'IOC');
+  document.getElementById('btn-fok').classList.toggle('active', t === 'FOK');
+  // MARKET is the only type that doesn't use price; IOC and FOK both require a limit
   document.getElementById('inp-price').disabled = (t === 'MARKET');
 }
 
 function manualSubmit() {
   const price = orderType === 'MARKET' ? null : +document.getElementById('inp-price').value;
   const qty = +document.getElementById('inp-qty').value || 1;
-  book.submitOrder(orderSide, orderType, price, qty);
+  const r = book.submitOrder(orderSide, orderType, price, qty);
   orderCount++;
+  if (r.rejectReason) {
+    flashSubmit(r.rejectReason);
+  } else if (orderType === 'IOC' && r.cancelledQty > 0) {
+    flashSubmit('IOC partial: ' + (qty - r.cancelledQty) + '/' + qty + ' filled, ' + r.cancelledQty + ' killed');
+  }
+  // Track manually-submitted resting orders so the user can see + cancel them
+  if (r.restingOrder) {
+    myOrders.set(r.restingOrder.id, {
+      side: r.restingOrder.side,
+      price: r.restingOrder.price,
+      qty: r.restingOrder.qty,
+    });
+    renderMyOrders();
+  }
+}
+
+function cancelMyOrder(id) {
+  const ok = book.cancelOrder(id);
+  if (ok) {
+    myOrders.delete(id);
+    renderMyOrders();
+  }
+}
+
+// Reconcile myOrders against current book state — drop any IDs that no longer
+// have resting qty (filled by an incoming taker, removed by a market sweep, etc.)
+function reconcileMyOrders() {
+  if (myOrders.size === 0) return;
+  const stillResting = new Set();
+  for (const level of book.bids) for (const o of level.orders) stillResting.add(o.id);
+  for (const level of book.asks) for (const o of level.orders) stillResting.add(o.id);
+  let changed = false;
+  for (const id of myOrders.keys()) {
+    if (!stillResting.has(id)) {
+      myOrders.delete(id);
+      changed = true;
+    } else {
+      // Update resting qty in case partial fill
+      const entry = myOrders.get(id);
+      let foundQty = 0;
+      for (const level of book.bids) for (const o of level.orders) if (o.id === id) foundQty = o.qty;
+      for (const level of book.asks) for (const o of level.orders) if (o.id === id) foundQty = o.qty;
+      if (foundQty !== entry.qty) { entry.qty = foundQty; changed = true; }
+    }
+  }
+  if (changed) renderMyOrders();
+}
+
+function renderMyOrders() {
+  const list = document.getElementById('my-orders-list');
+  if (myOrders.size === 0) {
+    list.innerHTML = '<div class="my-order-empty">no manual orders yet</div>';
+    return;
+  }
+  let html = '';
+  for (const [id, o] of myOrders) {
+    const sideClass = o.side === 'BUY' ? 'buy' : 'sell';
+    const sideLabel = o.side === 'BUY' ? 'B' : 'S';
+    html += '<div class="my-order-row">'
+      + '<span class="id">#' + id + '</span>'
+      + '<span class="side ' + sideClass + '">' + sideLabel + '</span>'
+      + '<span class="price">' + o.price.toFixed(2) + '</span>'
+      + '<span class="qty">' + o.qty + '</span>'
+      + '<span class="x" onclick="cancelMyOrder(' + id + ')">×</span>'
+      + '</div>';
+  }
+  list.innerHTML = html;
+}
+
+let _flashTimer = null;
+function flashSubmit(msg) {
+  let el = document.getElementById('submit-flash');
+  if (!el) {
+    el = document.createElement('span');
+    el.id = 'submit-flash';
+    el.style.cssText = 'margin-left:8px;font-size:10px;color:var(--amber);transition:opacity 0.5s';
+    const submitBtn = document.querySelector('#ctrl-panel .btn[onclick="manualSubmit()"]');
+    if (submitBtn && submitBtn.parentNode) submitBtn.parentNode.appendChild(el);
+  }
+  el.textContent = msg;
+  el.style.opacity = '1';
+  if (_flashTimer) clearTimeout(_flashTimer);
+  _flashTimer = setTimeout(() => { el.style.opacity = '0'; }, 2500);
 }
 
 function toggleAuto() {
@@ -106,12 +199,96 @@ function clearBook() {
 
 function runBenchmark() {
   document.getElementById('m-tput').textContent = 'running...';
-  // Run async to not block UI
+  document.getElementById('m-pcts').textContent = '—';
+  // Run async to not block UI. Capture full latency distribution for the histogram.
   setTimeout(() => {
-    const result = book.runBenchmark(100000);
-    document.getElementById('m-tput').textContent = result.ordersPerSec.toLocaleString() + ' ord/s';
-    document.getElementById('m-p95').textContent = result.p95us + ' \u00B5s';
+    const N = 100000;
+    const benchBook = new OrderBook();
+    const latencies = new Float64Array(N);
+    const start = performance.now();
+    for (let i = 0; i < N; i++) {
+      const side = Math.random() > 0.5 ? 'BUY' : 'SELL';
+      const price = +(100 + (Math.random() * 20 - 10)).toFixed(2);
+      const qty = 1 + Math.floor(Math.random() * 10);
+      const t0 = performance.now();
+      benchBook.submitOrder(side, 'LIMIT', price, qty);
+      latencies[i] = performance.now() - t0;
+    }
+    const elapsed = performance.now() - start;
+    const sorted = Float64Array.from(latencies).sort();
+    const p50us = +(sorted[Math.floor(N * 0.5)] * 1000).toFixed(1);
+    const p95us = +(sorted[Math.floor(N * 0.95)] * 1000).toFixed(1);
+    const p99us = +(sorted[Math.floor(N * 0.99)] * 1000).toFixed(1);
+    const ordersPerSec = Math.round(N / (elapsed / 1000));
+    lastBenchmark = { latencies, sorted, p50us, p95us, p99us };
+    document.getElementById('m-tput').textContent = ordersPerSec.toLocaleString() + ' ord/s';
+    document.getElementById('m-pcts').textContent = p50us + ' / ' + p95us + ' / ' + p99us + ' \u00B5s';
+    renderLatencyHist();
   }, 50);
+}
+
+function renderLatencyHist() {
+  if (!lastBenchmark) return;
+  const canvas = document.getElementById('latency-hist');
+  const rect = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = rect.width || 280, h = rect.height || 50;
+  if (canvas.width !== w * dpr || canvas.height !== h * dpr) {
+    canvas.width = w * dpr; canvas.height = h * dpr;
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+  }
+  const c = canvas.getContext('2d');
+  c.setTransform(dpr, 0, 0, dpr, 0, 0);
+  c.clearRect(0, 0, w, h);
+
+  // Use sorted latencies (in ms) — clip outliers above p99.5 to keep the histogram readable.
+  const sorted = lastBenchmark.sorted;
+  const p995 = sorted[Math.floor(sorted.length * 0.995)];
+  const minLat = sorted[0];
+  const maxLat = p995 > 0 ? p995 : sorted[sorted.length - 1];
+  const range = maxLat - minLat || 1e-6;
+
+  const BINS = 50;
+  const bins = new Uint32Array(BINS);
+  for (let i = 0; i < sorted.length; i++) {
+    if (sorted[i] > maxLat) continue;
+    const idx = Math.min(BINS - 1, Math.floor((sorted[i] - minLat) / range * BINS));
+    bins[idx]++;
+  }
+  let peak = 0;
+  for (let i = 0; i < BINS; i++) if (bins[i] > peak) peak = bins[i];
+  if (peak === 0) return;
+
+  // Log scale on Y so the long tail is visible.
+  const logPeak = Math.log10(peak + 1);
+  const barW = w / BINS;
+  c.fillStyle = '#ff8c00';
+  for (let i = 0; i < BINS; i++) {
+    if (bins[i] === 0) continue;
+    const logVal = Math.log10(bins[i] + 1);
+    const barH = (logVal / logPeak) * (h - 12);
+    c.fillRect(i * barW, h - barH - 2, Math.max(1, barW - 1), barH);
+  }
+
+  // Label p50/p95/p99 lines on the histogram
+  c.font = '8px ' + getComputedStyle(document.body).fontFamily;
+  c.fillStyle = '#3388ff';
+  for (const [pctLabel, pctVal] of [['p50', lastBenchmark.p50us / 1000], ['p95', lastBenchmark.p95us / 1000], ['p99', lastBenchmark.p99us / 1000]]) {
+    const x = ((pctVal - minLat) / range) * w;
+    if (x < 0 || x > w) continue;
+    c.strokeStyle = 'rgba(51, 136, 255, 0.5)';
+    c.beginPath();
+    c.moveTo(x, 2); c.lineTo(x, h - 2); c.stroke();
+    c.fillText(pctLabel, x + 1, 9);
+  }
+
+  // X-axis label
+  c.fillStyle = '#555';
+  c.font = '8px ' + getComputedStyle(document.body).fontFamily;
+  c.textAlign = 'left';
+  c.fillText((minLat * 1000).toFixed(1) + 'µs', 1, h - 1);
+  c.textAlign = 'right';
+  c.fillText((maxLat * 1000).toFixed(1) + 'µs', w - 1, h - 1);
 }
 
 // Click book row to fill price
@@ -132,6 +309,18 @@ function renderBook(snap) {
     1
   );
 
+  // Build a set of price levels where the user has a resting order, so we
+  // can mark those rows .mine without changing the snapshot shape.
+  const minePriceSet = new Set();
+  if (myOrders.size > 0) {
+    for (const level of book.bids) {
+      for (const o of level.orders) if (myOrders.has(o.id)) { minePriceSet.add(level.price); break; }
+    }
+    for (const level of book.asks) {
+      for (const o of level.orders) if (myOrders.has(o.id)) { minePriceSet.add(level.price); break; }
+    }
+  }
+
   // Build asks HTML (reversed: highest at top)
   let askHtml = '';
   let askCum = 0;
@@ -143,7 +332,8 @@ function renderBook(snap) {
   for (let i = askRows.length - 1; i >= 0; i--) {
     const l = askRows[i];
     const pct = (askCums[i] / maxCum * 100).toFixed(1);
-    askHtml += '<div class="book-row ask" onclick="onBookRowClick(' + l.price + ')">'
+    const mineClass = minePriceSet.has(l.price) ? ' mine' : '';
+    askHtml += '<div class="book-row ask' + mineClass + '" onclick="onBookRowClick(' + l.price + ')">'
       + '<span class="price">' + l.price.toFixed(2) + '</span>'
       + '<span class="size">' + l.qty + '</span>'
       + '<span class="cum">' + askCums[i] + '</span>'
@@ -163,7 +353,8 @@ function renderBook(snap) {
   for (let i = 0; i < bidRows.length; i++) {
     bidCum += bidRows[i].qty;
     const pct = (bidCum / maxCum * 100).toFixed(1);
-    bidHtml += '<div class="book-row bid" onclick="onBookRowClick(' + bidRows[i].price + ')">'
+    const mineClass = minePriceSet.has(bidRows[i].price) ? ' mine' : '';
+    bidHtml += '<div class="book-row bid' + mineClass + '" onclick="onBookRowClick(' + bidRows[i].price + ')">'
       + '<span class="price">' + bidRows[i].price.toFixed(2) + '</span>'
       + '<span class="size">' + bidRows[i].qty + '</span>'
       + '<span class="cum">' + bidCum + '</span>'
@@ -426,10 +617,11 @@ function checkInvariantsLive() {
     if (book.asks[i].price < book.asks[i - 1].price) { askOk = false; break; }
   }
 
-  // Check conservation
+  // Check conservation: rest + executed + cancelled === submitted
   const rest = book.getRestingQty();
   const exec = book.getExecutedQty();
-  const conserved = (rest + exec) === book.totalSubmittedQty;
+  const cancelled = book.totalCancelledQty;
+  const conserved = (rest + exec + cancelled) === book.totalSubmittedQty;
 
   // Update display (indices match INVARIANTS array)
   const items = list.children;
@@ -465,6 +657,7 @@ function renderLoop() {
     renderTape();
     renderStatus(snap);
     renderMetrics(snap);
+    reconcileMyOrders();
     if (autoRunning && frameCount % 30 === 0) {
       checkInvariantsLive();
     }

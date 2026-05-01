@@ -124,6 +124,57 @@
       assert(book.trades.length === 0, 'No trades on rejected market order');
     })();
 
+    // Test 6: IOC matches what it can, kills the rest, never rests
+    (function testIOC() {
+      const book = new OrderBook();
+      book.submitOrder('SELL', 'LIMIT', 100, 5);  // 5 available at 100
+      book.submitOrder('SELL', 'LIMIT', 102, 10); // 10 at 102 (above buyer's limit)
+
+      const r = book.submitOrder('BUY', 'IOC', 101, 12);
+      assert(r.fills.length === 1 && r.fills[0].qty === 5,
+        'IOC buy@101 qty=12: fills 5 at 100 (only matchable side)',
+        'fills=' + JSON.stringify(r.fills.map(f => ({p: f.price, q: f.qty}))));
+      assert(r.cancelledQty === 7, 'IOC remainder reported as cancelledQty=7',
+        'got cancelledQty=' + r.cancelledQty);
+      assert(r.restingOrder === null, 'IOC never rests on the book');
+
+      // The 102 ask is still resting, untouched
+      const snap = book.getSnapshot();
+      assert(snap.asks.length === 1 && snap.asks[0].price === 102 && snap.asks[0].qty === 10,
+        'IOC did not touch the 102 ask');
+    })();
+
+    // Test 7: FOK is all-or-nothing
+    (function testFOK_reject() {
+      const book = new OrderBook();
+      book.submitOrder('SELL', 'LIMIT', 100, 5);  // only 5 available at limit-friendly price
+      book.submitOrder('SELL', 'LIMIT', 102, 10); // 10 at 102 (above buyer's limit)
+
+      const r = book.submitOrder('BUY', 'FOK', 101, 12);
+      assert(r.rejectReason === 'FOK_NOT_FILLABLE',
+        'FOK buy@101 qty=12 rejected (only 5 fillable)',
+        'reason=' + r.rejectReason);
+      assert(r.fills.length === 0, 'FOK rejection: zero fills (no partial)');
+
+      // Book unchanged
+      const snap = book.getSnapshot();
+      assert(snap.asks.length === 2, 'FOK rejection: book unchanged');
+    })();
+
+    // Test 8: FOK fills fully when liquidity is sufficient
+    (function testFOK_fill() {
+      const book = new OrderBook();
+      book.submitOrder('SELL', 'LIMIT', 100, 5);
+      book.submitOrder('SELL', 'LIMIT', 101, 10);
+
+      const r = book.submitOrder('BUY', 'FOK', 101, 12);
+      assert(!r.rejectReason && r.fills.length === 2,
+        'FOK fully fillable: executes both levels',
+        'fills=' + r.fills.length + ' reject=' + r.rejectReason);
+      const totalFilled = r.fills.reduce((s, f) => s + f.qty, 0);
+      assert(totalFilled === 12, 'FOK total filled = 12', 'got ' + totalFilled);
+    })();
+
     // Summary
     summary.textContent = passed + ' passed, ' + failed + ' failed';
     summary.style.color = failed === 0 ? '#00cc66' : '#ff3333';
