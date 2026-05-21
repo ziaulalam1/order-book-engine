@@ -1,0 +1,5 @@
+# Real LOBSTER samples and generated synthetic CSVs are not tracked.
+# LOBSTER terms permit academic-use download but restrict redistribution.
+data/
+compare_report.txt
+*.zip
