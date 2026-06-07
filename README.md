@@ -111,4 +111,11 @@ No build step. No dependencies. No server.
 
 ## How AI Tooling Was Used
 
+## References
+
+- Huang, R. & Polak, T. (2011). "LOBSTER: Limit Order Book System — The Efficient Reconstructor." *Working Paper*, Humboldt-Universität zu Berlin. — Source of the Level II order book format and reconstruction methodology this engine models.
+- Cont, R., Stoikov, S., & Talreja, R. (2010). "A Stochastic Model for Order Book Dynamics." *Operations Research*, 58(3), 549–563. — Analysis of price impact, order flow statistics, and spread dynamics that informed the O-U order flow generator and the market impact visualization.
+
+## How AI Tooling Was Used
+
 I used an AI coding assistant on parts of this build and not on others. It was useful for Canvas math, grid scaffolding, and boilerplate around the bench harness. The matching semantics (MARKET, LIMIT, IOC, FOK), the non-mutating fillability peek that gives FOK its all-or-nothing guarantee, the conservation invariant including the separate cancelled bucket, and the 13 invariant tests are all mine. Where I overruled the assistant: it suggested a binary heap for the price ladder, which I tested against array+splice and rejected because the level count is small and the cache locality of arrays wins; it suggested adding a price-prediction model, which I rejected because matching has to be deterministic and an ML layer obscures the semantics; it suggested Vitest, which I declined in favor of the Node built-in `--test` runner so the project keeps zero dependencies.
