@@ -6,8 +6,6 @@ Price-time priority matching engine with real-time depth visualization, invarian
 
 ![Order book demo: Level 2 depth on the left, depth chart and trade tape in the middle, manual order controls and benchmark histogram on the right.](docs/screenshot.png) 
 
-<img width="1512" height="982" alt="image" src="https://github.com/user-attachments/assets/c067db97-7023-41d7-aa2c-1cf0160e5583" />
-
 
 ```
 node --test test/engine.test.mjs   # 13 invariants, ~80ms
